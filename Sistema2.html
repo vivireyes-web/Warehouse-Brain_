@@ -1,0 +1,1074 @@
+<!doctype html>
+<html lang="es" class="h-full">
+ <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Warehouse Brain</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&amp;display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Plus Jakarta Sans', 'sans-serif'] },
+          colors: {
+            brand: { 50:'#f0fdf4', 100:'#dcfce7', 200:'#bbf7d0', 300:'#86efac', 400:'#4ade80', 500:'#22c55e', 600:'#16a34a' },
+            sky: { 50:'#f0f9ff', 100:'#e0f2fe', 200:'#bae6fd', 300:'#7dd3fc', 400:'#38bdf8', 500:'#0ea5e9' },
+            ocean: { 600:'#2563eb', 700:'#1d4ed8', 800:'#1e40af' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    .sidebar-item { transition: all 0.15s; }
+    .sidebar-item:hover, .sidebar-item.active { background: linear-gradient(135deg, #dcfce7, #e0f2fe); }
+    .fade-in { animation: fadeIn 0.2s ease; }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+    input, select, textarea { font-size: 14px; }
+    table { font-size: 13px; }
+    .tab-active { border-bottom: 2px solid #22c55e; color: #16a34a; font-weight: 600; }
+  </style>
+  <style>body { box-sizing: border-box; }</style>
+</head>
+ <body class="h-full bg-gray-50 font-sans text-gray-800 overflow-hidden">
+  <div id="app" class="h-full flex"><!-- Sidebar -->
+   <aside id="sidebar" class="w-60 bg-white border-r border-gray-200 flex flex-col h-full overflow-y-auto shrink-0">
+    <div class="p-4 border-b border-gray-100 flex items-center gap-2">
+     <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-400 to-sky-400 flex items-center justify-center text-white text-base">🏭</div><span class="font-bold text-lg bg-gradient-to-r from-brand-600 to-ocean-600 bg-clip-text text-transparent">Warehouse Brain</span>
+    </div>
+    <nav class="flex-1 p-2 space-y-1" id="nav-menu"></nav>
+   </aside><!-- Main Content -->
+   <main class="flex-1 h-full overflow-y-auto">
+    <div id="content" class="p-6 fade-in"></div>
+   </main>
+  </div>
+  <script>
+const sections = [
+  { id:'producto', label:'Producto', icon:'package', subs:['Maestro de Productos','Agregar Producto','Eliminar Producto'] },
+  { id:'prep-recepcion', label:'Preparación de Recepción', icon:'clipboard-list', subs:['Nueva Preparación','Preparaciones de Recepción','Modificar Estado'] },
+  { id:'recepcion', label:'Recepción', icon:'truck', subs:['Recepciones','Buscar Ubicación'] },
+  { id:'almacenamiento', label:'Almacenamiento', icon:'archive', subs:['Almacenar','Modificar Estado de Ubicación','Maestro de Ubicaciones'] },
+  { id:'picking', label:'Picking', icon:'shopping-cart', subs:['Generar Orden de Picking','Modificar Estado de Orden','Realizar Picking'] },
+  { id:'trazabilidad', label:'Trazabilidad', icon:'scan-line', subs:['Pallets','Modificación de Status'] },
+  { id:'inventario', label:'Inventario', icon:'bar-chart-3', subs:[] },
+  { id:'historial', label:'Historial de Movimientos', icon:'history', subs:[] },
+  { id:'proveedores', label:'Evaluación de Proveedores', icon:'users', subs:[] },
+  { id:'alertas', label:'Alertas', icon:'bell', subs:[] }
+];
+
+let currentSection = 'producto';
+let currentSub = 0;
+
+// Data stores
+let productos = [];
+let preparaciones = [];
+let ubicaciones = [];
+let pallets = [];
+let pickingOrders = [];
+let movimientos = [];
+let evaluaciones = [];
+let entryCounter = 1;
+let pickingCounter = 1;
+
+function initData() {
+  // Sample ubicaciones
+  for(let i=1;i<=10;i++){
+    ubicaciones.push({
+      id_ubicacion:'UB-'+String(i).padStart(3,'0'),
+      clasificacion_abc:['A','B','C'][i%3],
+      clasificacion_peligrosidad:['Baja','Media','Alta'][i%3],
+      altura_maxima:(1.5+Math.random()*2).toFixed(1),
+      peso_maximo:(800+Math.floor(Math.random()*700)),
+      nivel: Math.ceil(i/3),
+      estado_fisico:'Disponible',
+      estado_operativo:'ninguno',
+      sku_almacenado:'',
+      id_pallet_ingresado:'',
+      valor_pallet_ingresado:'',
+      lote:'',
+      fecha_ingreso:'',
+      hora_ingreso:''
+    });
+  }
+}
+initData();
+
+const iconMap = {
+  package:'📦', clipboard:'📋', 'clipboard-list':'📋', truck:'🚚', archive:'🗄️', 'shopping-cart':'🛒', 'scan-line':'🔍', 'bar-chart-3':'📊', history:'⏱️', users:'👥', bell:'🔔', warehouse:'🏭'
+};
+
+// ===== N8N API WRAPPER =====
+const N8N_BASE_URL = 'https://vivii.app.n8n.cloud/webhook';
+
+async function callN8NApi(endpoint, method='GET', data=null, showLoadingToast=true){
+  const url = `${N8N_BASE_URL}${endpoint}`;
+  const loadingId = showLoadingToast ? `loading-${Date.now()}` : null;
+  
+  try {
+    if(loadingId) showToast('Procesando...', 'info');
+    
+    const options = {
+      method,
+      headers: { 'Content-Type': 'application/json' }
+    };
+    
+    if(data && (method === 'POST' || method === 'PUT')) {
+      options.body = JSON.stringify(data);
+    }
+    
+    const response = await fetch(url, options);
+    
+    if(!response.ok) {
+      throw new Error(`API Error: ${response.status} ${response.statusText}`);
+    }
+    
+    const result = await response.json();
+    return { success: true, data: result };
+  } catch(error) {
+    console.error(`N8N API Error (${endpoint}):`, error);
+    return { success: false, error: error.message };
+  }
+}
+
+function buildNav(){
+  const nav = document.getElementById('nav-menu');
+  nav.innerHTML = sections.map((s,i)=>`
+    <div class="sidebar-item rounded-lg px-3 py-2 cursor-pointer ${currentSection===s.id?'active':''} flex items-center gap-2 text-sm"
+         onclick="selectSection('${s.id}')">
+      <span class="text-base ${currentSection===s.id?'text-brand-600':'text-gray-400'}">${iconMap[s.icon]||'•'}</span>
+      <span class="${currentSection===s.id?'text-brand-700 font-semibold':'text-gray-600'}">${s.label}</span>
+    </div>
+  `).join('');
+}
+
+function selectSection(id){
+  currentSection=id; currentSub=0;
+  buildNav(); renderContent();
+}
+
+function selectSub(idx){
+  currentSub=idx; renderContent();
+}
+
+function renderTabs(subs){
+  if(!subs.length) return '';
+  return `<div class="flex border-b border-gray-200 mb-4 gap-4">${subs.map((s,i)=>
+    `<button onclick="selectSub(${i})" class="pb-2 px-1 text-sm ${currentSub===i?'tab-active':'text-gray-500 hover:text-gray-700'}">${s}</button>`
+  ).join('')}</div>`;
+}
+
+function card(content){ return `<div class="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">${content}</div>`; }
+
+function inputField(label,id,type='text',placeholder='',value=''){
+  const valueAttr = value?` value="${value}"`:'';
+  return `<div class="flex flex-col gap-1">
+    <label for="${id}" class="text-xs font-medium text-gray-500">${label}</label>
+    <input id="${id}" type="${type}" placeholder="${placeholder}"${valueAttr} class="border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400">
+  </div>`;
+}
+
+function selectField(label,id,options,selected=''){
+  return `<div class="flex flex-col gap-1">
+    <label for="${id}" class="text-xs font-medium text-gray-500">${label}</label>
+    <select id="${id}" class="border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-300">
+      <option value="">Seleccionar...</option>
+      ${options.map(o=>`<option value="${o}"${o===selected?' selected':''}>${o}</option>`).join('')}
+    </select>
+  </div>`;
+}
+
+function btn(text,onclick,color='brand'){
+  const colors = {brand:'bg-brand-500 hover:bg-brand-600',sky:'bg-sky-500 hover:bg-sky-600',red:'bg-red-500 hover:bg-red-600',ocean:'bg-ocean-600 hover:bg-ocean-700'};
+  return `<button onclick="${onclick}" class="${colors[color]} text-white font-medium rounded-lg px-5 py-2.5 text-sm transition">${text}</button>`;
+}
+
+function renderContent(){
+  const sec = sections.find(s=>s.id===currentSection);
+  let html = `<h1 class="text-2xl font-bold text-gray-800 mb-4">${sec.label}</h1>`;
+  html += renderTabs(sec.subs);
+  html += `<div class="fade-in" id="content-area">Cargando...</div>`;
+  document.getElementById('content').innerHTML = html;
+  
+  // Get content (might be async)
+  const content = getContent();
+  if(content instanceof Promise){
+    content.then(result=>{
+      document.getElementById('content-area').innerHTML = result;
+    }).catch(err=>{
+      console.error('Error rendering content:', err);
+      document.getElementById('content-area').innerHTML = '<div class="text-red-500">Error al cargar contenido</div>';
+    });
+  } else {
+    document.getElementById('content-area').innerHTML = content;
+  }
+}
+
+function getContent(){
+  switch(currentSection){
+    case 'producto': return renderProducto();
+    case 'prep-recepcion': return renderPrepRecepcion();
+    case 'recepcion': return renderRecepcion();
+    case 'almacenamiento': return renderAlmacenamiento();
+    case 'picking': return renderPicking();
+    case 'trazabilidad': return renderTrazabilidad();
+    case 'inventario': return renderInventario();
+    case 'historial': return renderHistorial();
+    case 'proveedores': return renderProveedores();
+    case 'alertas': return renderAlertas();
+    default: return '';
+  }
+}
+
+// ===== PRODUCTO =====
+function renderProducto(){
+  if(currentSub===0){
+    let rows = productos.map(p=>`<tr class="border-b border-gray-100"><td class="py-2 px-3">${p.sku}</td><td class="py-2 px-3">${p.formato}</td><td class="py-2 px-3">${p.peligrosidad}</td><td class="py-2 px-3">${p.alto}</td><td class="py-2 px-3">${p.peso}</td></tr>`).join('');
+    return card(`<h3 class="font-semibold mb-3">Maestro de Productos</h3>
+      <button onclick="cargarProductosDelBackend()" class="mb-3 px-3 py-1.5 text-xs bg-sky-500 hover:bg-sky-600 text-white rounded-lg">🔄 Cargar del Servidor</button>
+      <div class="overflow-x-auto"><table class="w-full text-left"><thead class="bg-gray-50"><tr><th class="py-2 px-3">SKU</th><th class="py-2 px-3">Formato</th><th class="py-2 px-3">Peligrosidad</th><th class="py-2 px-3">Alto Pallet</th><th class="py-2 px-3">Peso Pallet</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="py-4 text-center text-gray-400">Sin productos</td></tr>'}</tbody></table></div>`);
+  }
+  if(currentSub===1){
+    return card(`<h3 class="font-semibold mb-4">Agregar Producto</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">
+        ${inputField('SKU','prod-sku','text','Ej: SKU-001')}
+        ${inputField('Formato','prod-formato','text','Ej: 1L')}
+        ${selectField('Clasificación Peligrosidad','prod-pelig',['Baja','Media','Alta'])}
+        ${inputField('Alto Pallet (m)','prod-alto','number','Ej: 1.5')}
+        ${inputField('Peso Pallet (kg)','prod-peso','number','Ej: 1000')}
+      </div>
+      ${btn('Agregar Producto','agregarProducto()')}`);
+  }
+  if(currentSub===2){
+    return card(`<h3 class="font-semibold mb-4">Eliminar Producto</h3>
+      <div class="flex gap-3 items-end mb-4">
+        ${inputField('Buscar por SKU','del-sku','text','SKU-001')}
+        ${btn('Buscar','buscarProductoEliminar()','sky')}
+      </div>
+      <div id="del-result"></div>`);
+  }
+  return '';
+}
+
+async function cargarProductosDelBackend(){
+  showToast('Cargando productos...', 'info');
+  const result = await callN8NApi('/Productos', 'GET');
+  if(result.success){
+    productos = Array.isArray(result.data) ? result.data : (result.data.productos || []);
+    saveData();
+    renderContent();
+    showToast('Productos cargados correctamente');
+  } else {
+    showToast('Error al cargar productos: ' + result.error, 'error');
+  }
+}
+
+async function agregarProducto(){
+  const sku=document.getElementById('prod-sku').value.trim();
+  const formato=document.getElementById('prod-formato').value.trim();
+  const pelig=document.getElementById('prod-pelig').value;
+  const alto=document.getElementById('prod-alto').value;
+  const peso=document.getElementById('prod-peso').value;
+  if(!sku||!formato||!pelig||!alto||!peso){showToast('Complete todos los campos','error');return;}
+  
+  const payload = { sku, formato, peligrosidad:pelig, alto, peso };
+  const result = await callN8NApi('/Productos', 'POST', payload);
+  
+  if(result.success){
+    productos.push(payload);
+    showToast('Producto agregado correctamente');
+    saveData();
+    renderContent();
+  } else {
+    showToast('Error al agregar producto: ' + result.error, 'error');
+  }
+}
+
+function buscarProductoEliminar(){
+  const sku=document.getElementById('del-sku').value.trim();
+  const idx=productos.findIndex(p=>p.sku===sku);
+  const el=document.getElementById('del-result');
+  if(idx===-1){el.innerHTML='<p class="text-red-500 text-sm">Producto no encontrado</p>';return;}
+  el.innerHTML=`<div class="p-3 bg-gray-50 rounded-lg flex justify-between items-center">
+    <span><strong>${productos[idx].sku}</strong> - ${productos[idx].formato}</span>
+    ${btn('Eliminar Producto','eliminarProducto("'+sku+'")','red')}
+  </div>`;
+}
+
+async function eliminarProducto(sku){
+  const result = await callN8NApi('/Productos', 'POST', { action: 'delete', sku });
+  
+  if(result.success){
+    productos=productos.filter(p=>p.sku!==sku);
+    showToast('Producto eliminado');
+    saveData();
+    renderContent();
+  } else {
+    showToast('Error al eliminar producto: ' + result.error, 'error');
+  }
+}
+
+// ===== PREPARACIÓN DE RECEPCIÓN =====
+function renderPrepRecepcion(){
+  if(currentSub===0){
+    return card(`<h3 class="font-semibold mb-4">Nueva Preparación de Recepción</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">
+        ${inputField('SKU','prep-sku','text','SKU-001')}
+        ${inputField('Proveedor','prep-prov','text','Proveedor XYZ')}
+        ${inputField('Lote','prep-lote','text','LOTE-001')}
+        ${inputField('Fecha Vencimiento Lote','prep-fvenc','date')}
+        ${inputField('Cantidad de Pallets','prep-cant','number','10')}
+        ${inputField('Fecha de Ingreso','prep-fing','date')}
+        ${inputField('Costo por Pallet','prep-costo','number','50000')}
+        ${selectField('Estado','prep-estado',['Pendiente','En Revisión','Aprobado','Rechazado'])}
+      </div>
+      <div id="rechazo-fields" class="hidden grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        ${selectField('Motivo de Rechazo','prep-motivo',['No Coincide con Factura Comercial','Llegada Fuera de Horario','Calidad Inaceptable'])}
+        ${inputField('Cantidad Pallets Rechazada','prep-cantrech','number','0')}
+      </div>
+      ${btn('Registrar Preparación','registrarPreparacion()')}`);
+  }
+  if(currentSub===1){
+    let rows=preparaciones.map(p=>`<tr class="border-b border-gray-100">
+      <td class="py-2 px-2">${p.id}</td><td class="py-2 px-2">${p.sku}</td><td class="py-2 px-2">${p.proveedor}</td>
+      <td class="py-2 px-2">${p.lote}</td><td class="py-2 px-2">${p.fecha_venc}</td><td class="py-2 px-2">${p.cantidad}</td>
+      <td class="py-2 px-2">${p.fecha_ingreso}</td><td class="py-2 px-2">$${p.costo}</td>
+      <td class="py-2 px-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${p.estado==='Aprobado'?'bg-green-100 text-green-700':p.estado==='Rechazado'?'bg-red-100 text-red-700':p.estado==='En Revisión'?'bg-yellow-100 text-yellow-700':'bg-gray-100 text-gray-700'}">${p.estado}</span></td>
+      <td class="py-2 px-2">${p.motivo||'-'}</td><td class="py-2 px-2">${p.cant_rechazada||'-'}</td>
+    </tr>`).join('');
+    return card(`<h3 class="font-semibold mb-3">Preparaciones de Recepción</h3>
+      <button onclick="cargarPreparacionesDelBackend()" class="mb-3 px-3 py-1.5 text-xs bg-sky-500 hover:bg-sky-600 text-white rounded-lg">🔄 Cargar del Servidor</button>
+      <div class="overflow-x-auto"><table class="w-full text-left text-xs"><thead class="bg-gray-50"><tr>
+        <th class="py-2 px-2">ID</th><th class="py-2 px-2">SKU</th><th class="py-2 px-2">Proveedor</th><th class="py-2 px-2">Lote</th><th class="py-2 px-2">F. Venc.</th><th class="py-2 px-2">Pallets</th><th class="py-2 px-2">F. Ingreso</th><th class="py-2 px-2">Costo/Pallet</th><th class="py-2 px-2">Estado</th><th class="py-2 px-2">Motivo Rechazo</th><th class="py-2 px-2">Cant. Rech.</th>
+      </tr></thead><tbody>${rows||'<tr><td colspan="11" class="py-4 text-center text-gray-400">Sin registros</td></tr>'}</tbody></table></div>`);
+  }
+  if(currentSub===2){
+    return card(`<h3 class="font-semibold mb-4">Modificar Estado de Preparación</h3>
+      <div class="flex gap-3 items-end mb-4">
+        ${inputField('Buscar por ID_entrada','mod-id','text','ENT-001')}
+        ${btn('Buscar','buscarPreparacion()','sky')}
+      </div>
+      <div id="mod-prep-result"></div>`);
+  }
+  return '';
+}
+
+async function cargarPreparacionesDelBackend(){
+  showToast('Cargando preparaciones...', 'info');
+  const result = await callN8NApi('/consultar-preparaciones', 'GET');
+  if(result.success){
+    preparaciones = Array.isArray(result.data) ? result.data : (result.data.preparaciones || []);
+    saveData();
+    renderContent();
+    showToast('Preparaciones cargadas correctamente');
+  } else {
+    showToast('Error al cargar preparaciones: ' + result.error, 'error');
+  }
+}
+
+async function registrarPreparacion(){
+  const sku=document.getElementById('prep-sku').value.trim();
+  const prov=document.getElementById('prep-prov').value.trim();
+  const lote=document.getElementById('prep-lote').value.trim();
+  const fvenc=document.getElementById('prep-fvenc').value;
+  const cant=document.getElementById('prep-cant').value;
+  const fing=document.getElementById('prep-fing').value;
+  const costo=document.getElementById('prep-costo').value;
+  const estado=document.getElementById('prep-estado').value;
+  if(!sku||!prov||!lote||!fvenc||!cant||!fing||!costo||!estado){showToast('Complete todos los campos','error');return;}
+  let motivo='',cantrech='';
+  if(estado==='Rechazado'){
+    motivo=document.getElementById('prep-motivo').value;
+    cantrech=document.getElementById('prep-cantrech').value;
+    if(!motivo||!cantrech){showToast('Complete campos de rechazo','error');return;}
+  }
+  
+  const payload = { sku, proveedor:prov, lote, fecha_venc:fvenc, cantidad:cant, fecha_ingreso:fing, costo_por_pallet:costo, estado, motivo_rechazo:motivo, cantidad_rechazada:cantrech };
+  const result = await callN8NApi('/registrar-preparacion', 'POST', payload);
+  
+  if(result.success){
+    const id='ENT-'+String(entryCounter++).padStart(3,'0');
+    preparaciones.push({id,sku,proveedor:prov,lote,fecha_venc:fvenc,cantidad:cant,fecha_ingreso:fing,costo,estado,motivo,cant_rechazada:cantrech});
+    // Create pallets
+    for(let i=0;i<parseInt(cant);i++){
+      const pid='PAL-'+String(pallets.length+1).padStart(4,'0');
+      pallets.push({id_pallet:pid,sku,status:'Transito previo a almacenamiento',orden_picking:'',lote,fecha_venc:fvenc,fecha_mod:fing,hora_mod:new Date().toLocaleTimeString()});
+    }
+    addMovimiento(id,fing,'Externo','Recepción','Ingreso');
+    showToast(`Preparación ${id} registrada`);
+    saveData(); renderContent();
+  } else {
+    showToast('Error al registrar preparación: ' + result.error, 'error');
+  }
+}
+
+async function buscarPreparacion(){
+  const id=document.getElementById('mod-id').value.trim();
+  const prep=preparaciones.find(p=>p.id===id);
+  const el=document.getElementById('mod-prep-result');
+  if(!prep){el.innerHTML='<p class="text-red-500 text-sm">No encontrado</p>';return;}
+  el.innerHTML=`<div class="p-4 bg-gray-50 rounded-lg space-y-3">
+    <p class="text-sm"><strong>ID:</strong> ${prep.id} | <strong>SKU:</strong> ${prep.sku} | <strong>Estado actual:</strong> ${prep.estado}</p>
+    <div class="flex gap-3 items-end">
+      ${selectField('Nuevo Estado','mod-new-estado',['Pendiente','En Revisión','Aprobado','Rechazado'])}
+      ${btn('Aplicar Cambio','aplicarCambioPrep("'+prep.id+'")','ocean')}
+    </div>
+  </div>`;
+}
+
+async function aplicarCambioPrep(id){
+  const ne=document.getElementById('mod-new-estado').value;
+  if(!ne){showToast('Seleccione estado','error');return;}
+  const p=preparaciones.find(x=>x.id===id);
+  if(!p) return;
+  
+  const result = await callN8NApi('/modificar-estado', 'POST', { id, nuevo_estado: ne });
+  
+  if(result.success){
+    p.estado=ne;
+    showToast('Estado actualizado');
+    saveData();
+    renderContent();
+  } else {
+    showToast('Error al actualizar estado: ' + result.error, 'error');
+  }
+}
+
+// ===== RECEPCIÓN =====
+function renderRecepcion(){
+  if(currentSub===0){
+    let rows=preparaciones.map(p=>`<tr class="border-b border-gray-100">
+      <td class="py-2 px-2">${p.id}</td><td class="py-2 px-2">${p.sku}</td><td class="py-2 px-2">${p.proveedor}</td>
+      <td class="py-2 px-2">${p.lote}</td><td class="py-2 px-2">${p.fecha_venc}</td><td class="py-2 px-2">${p.cantidad}</td>
+      <td class="py-2 px-2">${p.fecha_ingreso}</td><td class="py-2 px-2">$${p.costo}</td>
+      <td class="py-2 px-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${p.estado==='Aprobado'?'bg-green-100 text-green-700':p.estado==='Rechazado'?'bg-red-100 text-red-700':'bg-gray-100 text-gray-700'}">${p.estado}</span></td>
+      <td class="py-2 px-2">${p.motivo||'-'}</td><td class="py-2 px-2">${p.cant_rechazada||'-'}</td>
+    </tr>`).join('');
+    return card(`<div class="overflow-x-auto"><table class="w-full text-left text-xs"><thead class="bg-gray-50"><tr>
+      <th class="py-2 px-2">ID_entrada</th><th class="py-2 px-2">SKU</th><th class="py-2 px-2">Proveedor</th><th class="py-2 px-2">Lote</th><th class="py-2 px-2">F. Venc.</th><th class="py-2 px-2">Pallets</th><th class="py-2 px-2">F. Ingreso</th><th class="py-2 px-2">Costo/Pallet</th><th class="py-2 px-2">Estado</th><th class="py-2 px-2">Motivo</th><th class="py-2 px-2">Cant. Rech.</th>
+    </tr></thead><tbody>${rows||'<tr><td colspan="11" class="py-4 text-center text-gray-400">Sin recepciones</td></tr>'}</tbody></table></div>`);
+  }
+  if(currentSub===1){
+    return card(`<h3 class="font-semibold mb-4">Buscar Ubicación por SKU</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        ${inputField('SKU','recep-sku','text','SKU-001')}
+        ${inputField('Cantidad de Pallets','recep-cant','number','5')}
+      </div>
+      ${btn('Buscar Ubicación','buscarUbicacionRecepcion()')}
+      <div id="recep-ubic-result" class="mt-4"></div>`);
+  }
+  return '';
+}
+
+async function buscarUbicacionRecepcion(){
+  const sku=document.getElementById('recep-sku').value.trim();
+  const cantidad=parseInt(document.getElementById('recep-cant').value,10);
+  const result=document.getElementById('recep-ubic-result');
+  if(!sku||!cantidad||cantidad<=0){showToast('Complete SKU y cantidad válida','error');result.innerHTML='';return;}
+  
+  // Call N8N endpoint
+  const apiResult = await callN8NApi('/Recepción-Ubicación', 'POST', { sku, cantidad });
+  
+  if(apiResult.success){
+    const ubicacionesDisponibles = Array.isArray(apiResult.data) ? apiResult.data : (apiResult.data.ubicaciones || []);
+    if(ubicacionesDisponibles.length === 0){
+      result.innerHTML='<div class="p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">No hay ubicaciones disponibles</div>';
+      return;
+    }
+    result.innerHTML=`<div class="p-4 bg-green-50 border border-green-200 rounded-lg text-sm space-y-2">
+      <p class="font-medium text-gray-700">${ubicacionesDisponibles.length} ubicación(es) disponible(s) encontradas para ${sku}.</p>
+      <div class="grid gap-2">${ubicacionesDisponibles.slice(0,5).map(u=>{
+        const ubObj = typeof u === 'string' ? { id_ubicacion: u } : u;
+        return `<div class="p-3 bg-white border border-gray-200 rounded-lg"><strong>${ubObj.id_ubicacion || ubObj}</strong></div>`;
+      }).join('')}</div>
+    </div>`;
+  } else {
+    result.innerHTML=`<div class="p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">Error: ${apiResult.error}</div>`;
+  }
+}
+
+// ===== ALMACENAMIENTO =====
+function renderAlmacenamiento(){
+  if(currentSub===0){
+    return card(`<h3 class="font-semibold mb-4">Almacenar Pallet</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        ${inputField('ID de Pallet','alm-pallet','text','PAL-0001')}
+        ${inputField('ID de Ubicación','alm-ubic','text','UB-001')}
+      </div>
+      ${btn('Almacenar','almacenarPallet()')}`);
+  }
+  if(currentSub===1){
+    return card(`<h3 class="font-semibold mb-4">Modificar Estado de Ubicación</h3>
+      <div class="flex gap-3 items-end mb-4">
+        ${inputField('Buscar por ID Ubicación','ubic-id','text','UB-001')}
+        ${btn('Buscar','buscarUbicacion()','sky')}
+      </div>
+      <div id="ubic-result"></div>`);
+  }
+  if(currentSub===2){
+    return renderMaestroUbicaciones();
+  }
+  return '';
+}
+
+async function almacenarPallet(){
+  const pid=document.getElementById('alm-pallet').value.trim();
+  const uid=document.getElementById('alm-ubic').value.trim();
+  if(!pid||!uid){showToast('Complete todos los campos','error');return;}
+  const ub=ubicaciones.find(u=>u.id_ubicacion===uid);
+  if(!ub){showToast('Ubicación no encontrada','error');return;}
+  if(ub.estado_fisico==='Ocupado'){showToast('Ubicación ocupada','error');return;}
+  const pal=pallets.find(p=>p.id_pallet===pid);
+  if(!pal){showToast('Pallet no encontrado','error');return;}
+  
+  const payload = { id_pallet: pid, id_ubicacion: uid };
+  const result = await callN8NApi('/store-pallet', 'POST', payload);
+  
+  if(result.success){
+    ub.estado_fisico='Ocupado';
+    ub.estado_operativo='almacenando';
+    ub.sku_almacenado=pal.sku;
+    ub.id_pallet_ingresado=pid;
+    ub.valor_pallet_ingresado=preparaciones.find(p=>p.sku===pal.sku)?.costo||'0';
+    ub.lote=pal.lote;
+    const now=new Date();
+    ub.fecha_ingreso=now.toISOString().split('T')[0];
+    ub.hora_ingreso=now.toLocaleTimeString();
+    pal.status='almacenado';
+    pal.fecha_mod=ub.fecha_ingreso;
+    pal.hora_mod=ub.hora_ingreso;
+    addMovimiento(pid,ub.fecha_ingreso,'Recepción',uid,'Almacenamiento');
+    showToast(`Pallet ${pid} almacenado en ${uid}`);
+    saveData(); renderContent();
+  } else {
+    showToast('Error al almacenar pallet: ' + result.error, 'error');
+  }
+}
+
+async function cargarUbicacionesDelBackend(){
+  showToast('Cargando ubicaciones...', 'info');
+  const result = await callN8NApi('/master-locations', 'GET');
+  if(result.success){
+    ubicaciones = Array.isArray(result.data) ? result.data : (result.data.ubicaciones || []);
+    saveData();
+    renderContent();
+    showToast('Ubicaciones cargadas correctamente');
+  } else {
+    showToast('Error al cargar ubicaciones: ' + result.error, 'error');
+  }
+}
+
+async function buscarUbicacion(){
+  const uid=document.getElementById('ubic-id').value.trim();
+  const ub=ubicaciones.find(u=>u.id_ubicacion===uid);
+  const el=document.getElementById('ubic-result');
+  if(!ub){el.innerHTML='<p class="text-red-500 text-sm">Ubicación no encontrada</p>';return;}
+  el.innerHTML=`<div class="p-4 bg-gray-50 rounded-lg space-y-4">
+    <p class="text-sm"><strong>ID:</strong> ${ub.id_ubicacion} | <strong>Estado Físico:</strong> ${ub.estado_fisico} | <strong>Estado Operativo:</strong> ${ub.estado_operativo}</p>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      ${selectField('Estado Físico','ubic-efis',['Disponible','Ocupado'],ub.estado_fisico)}
+      ${selectField('Estado Operativo','ubic-eop',['ninguno','almacenando','en picking','bloqueado'],ub.estado_operativo)}
+    </div>
+    <div id="ubic-ocupado-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 ${ub.estado_fisico==='Disponible'?'hidden':''}">
+      ${inputField('SKU Almacenado','ubic-sku','text','',ub.sku_almacenado)}
+      ${inputField('ID Pallet','ubic-pal','text','',ub.id_pallet_ingresado)}
+      ${inputField('Valor Pallet','ubic-val','number','',ub.valor_pallet_ingresado)}
+      ${inputField('Lote','ubic-lote','text','',ub.lote)}
+      ${inputField('Fecha Ingreso','ubic-fing','date','',ub.fecha_ingreso)}
+      ${inputField('Hora Ingreso','ubic-hing','time','',ub.hora_ing)}
+    </div>
+    ${btn('Realizar Cambios','aplicarCambioUbic("'+uid+'")','ocean')}
+  </div>`;
+}
+
+async function aplicarCambioUbic(uid){
+  const ub=ubicaciones.find(u=>u.id_ubicacion===uid);
+  if(!ub)return;
+  const ef=document.getElementById('ubic-efis').value;
+  const eo=document.getElementById('ubic-eop').value;
+  
+  const payload = { id_ubicacion: uid, estado_fisico: ef, estado_operativo: eo };
+  const result = await callN8NApi('/modify-status', 'POST', payload);
+  
+  if(result.success){
+    ub.estado_fisico=ef||ub.estado_fisico;
+    ub.estado_operativo=eo||ub.estado_operativo;
+    if(ef==='Disponible'){
+      ub.sku_almacenado='';ub.id_pallet_ingresado='';ub.valor_pallet_ingresado='';ub.lote='';ub.fecha_ingreso='';ub.hora_ingreso='';
+    } else if(ef==='Ocupado'){
+      ub.sku_almacenado=document.getElementById('ubic-sku').value||ub.sku_almacenado;
+      ub.id_pallet_ingresado=document.getElementById('ubic-pal').value||ub.id_pallet_ingresado;
+      ub.valor_pallet_ingresado=document.getElementById('ubic-val').value||ub.valor_pallet_ingresado;
+      ub.lote=document.getElementById('ubic-lote').value||ub.lote;
+      ub.fecha_ingreso=document.getElementById('ubic-fing').value||ub.fecha_ingreso;
+      ub.hora_ingreso=document.getElementById('ubic-hing').value||ub.hora_ingreso;
+    }
+    showToast('Ubicación actualizada');
+    saveData();
+    renderContent();
+  } else {
+    showToast('Error al actualizar ubicación: ' + result.error, 'error');
+  }
+}
+
+function renderMaestroUbicaciones(){
+  let filterHtml=`<div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 mb-4">
+    <button onclick="cargarUbicacionesDelBackend()" class="col-span-full mb-2 px-3 py-1.5 text-xs bg-sky-500 hover:bg-sky-600 text-white rounded-lg">🔄 Cargar del Servidor</button>
+    <input id="f-id" placeholder="ID Ubicación" class="text-xs border rounded px-2 py-1" oninput="filterUbic()">
+    <select id="f-abc" class="text-xs border rounded px-2 py-1" onchange="filterUbic()"><option value="">ABC</option><option>A</option><option>B</option><option>C</option></select>
+    <select id="f-efis" class="text-xs border rounded px-2 py-1" onchange="filterUbic()"><option value="">Est. Físico</option><option>Disponible</option><option>Ocupado</option></select>
+    <select id="f-eop" class="text-xs border rounded px-2 py-1" onchange="filterUbic()"><option value="">Est. Operativo</option><option>ninguno</option><option>almacenando</option><option>en picking</option><option>bloqueado</option></select>
+    <input id="f-sku" placeholder="SKU" class="text-xs border rounded px-2 py-1" oninput="filterUbic()">
+    <input id="f-pallet" placeholder="ID Pallet" class="text-xs border rounded px-2 py-1" oninput="filterUbic()">
+  </div>`;
+  return card(`<h3 class="font-semibold mb-3">Maestro de Ubicaciones</h3>${filterHtml}<div class="overflow-x-auto" id="ubic-table">${buildUbicTable(ubicaciones)}</div>`);
+}
+
+function buildUbicTable(data){
+  let rows=data.map(u=>`<tr class="border-b border-gray-100">
+    <td class="py-1.5 px-2">${u.id_ubicacion}</td><td class="py-1.5 px-2">${u.clasificacion_abc}</td><td class="py-1.5 px-2">${u.clasificacion_peligrosidad}</td>
+    <td class="py-1.5 px-2">${u.altura_maxima}</td><td class="py-1.5 px-2">${u.peso_maximo}</td><td class="py-1.5 px-2">${u.nivel}</td>
+    <td class="py-1.5 px-2"><span class="px-1.5 py-0.5 rounded text-xs ${u.estado_fisico==='Ocupado'?'bg-red-100 text-red-600':'bg-green-100 text-green-600'}">${u.estado_fisico}</span></td>
+    <td class="py-1.5 px-2">${u.estado_operativo}</td><td class="py-1.5 px-2">${u.sku_almacenado||'-'}</td>
+    <td class="py-1.5 px-2">${u.id_pallet_ingresado||'-'}</td><td class="py-1.5 px-2">${u.valor_pallet_ingresado||'-'}</td>
+    <td class="py-1.5 px-2">${u.lote||'-'}</td><td class="py-1.5 px-2">${u.fecha_ingreso||'-'}</td><td class="py-1.5 px-2">${u.hora_ingreso||'-'}</td>
+  </tr>`).join('');
+  return `<table class="w-full text-left text-xs"><thead class="bg-gray-50"><tr>
+    <th class="py-2 px-2">ID</th><th class="py-2 px-2">ABC</th><th class="py-2 px-2">Peligrosidad</th><th class="py-2 px-2">Alt. Máx</th><th class="py-2 px-2">Peso Máx</th><th class="py-2 px-2">Nivel</th><th class="py-2 px-2">Est. Físico</th><th class="py-2 px-2">Est. Op.</th><th class="py-2 px-2">SKU</th><th class="py-2 px-2">ID Pallet</th><th class="py-2 px-2">Valor</th><th class="py-2 px-2">Lote</th><th class="py-2 px-2">F. Ingreso</th><th class="py-2 px-2">Hora</th>
+  </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function filterUbic(){
+  let filtered=ubicaciones.filter(u=>{
+    const fid=document.getElementById('f-id').value.toLowerCase();
+    const fabc=document.getElementById('f-abc').value;
+    const fefis=document.getElementById('f-efis').value;
+    const feop=document.getElementById('f-eop').value;
+    const fsku=document.getElementById('f-sku').value.toLowerCase();
+    const fpal=document.getElementById('f-pallet').value.toLowerCase();
+    if(fid&&!u.id_ubicacion.toLowerCase().includes(fid))return false;
+    if(fabc&&u.clasificacion_abc!==fabc)return false;
+    if(fefis&&u.estado_fisico!==fefis)return false;
+    if(feop&&u.estado_operativo!==feop)return false;
+    if(fsku&&!u.sku_almacenado.toLowerCase().includes(fsku))return false;
+    if(fpal&&!u.id_pallet_ingresado.toLowerCase().includes(fpal))return false;
+    return true;
+  });
+  document.getElementById('ubic-table').innerHTML=buildUbicTable(filtered);
+}
+
+// ===== PICKING =====
+function renderPicking(){
+  if(currentSub===0){
+    return card(`<h3 class="font-semibold mb-4">Generar Orden de Picking</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">
+        ${inputField('Número OC','pick-oc','text','OC-001')}
+        ${inputField('Número Factura','pick-fact','text','FACT-001')}
+        ${inputField('RUT Cliente','pick-rut','text','12.345.678-9')}
+        ${inputField('Nombre Cliente','pick-nombre','text','Empresa ABC')}
+        ${inputField('Dirección Entrega','pick-dir','text','Av. Principal 123')}
+        ${inputField('Comuna Entrega','pick-comuna','text','Santiago')}
+        ${inputField('SKU Producto','pick-sku','text','SKU-001')}
+        ${inputField('Cantidad Pallets','pick-cant','number','5')}
+        ${inputField('Fecha Entrega Solicitada','pick-fecha','date')}
+      </div>
+      ${btn('Generar Orden de Picking','generarPicking()')}`);
+  }
+  if(currentSub===1){
+    return card(`<h3 class="font-semibold mb-4">Modificar Estado de Orden</h3>
+      <div class="flex gap-3 items-end mb-4">
+        ${inputField('ID Orden','pick-mod-id','text','PICK-001')}
+        ${btn('Buscar','buscarPicking()','sky')}
+      </div>
+      <div id="pick-mod-result"></div>
+      <div class="mt-4">
+        <h4 class="font-medium text-sm mb-2">Órdenes Registradas</h4>
+        <div class="overflow-x-auto"><table class="w-full text-left text-xs"><thead class="bg-gray-50"><tr>
+          <th class="py-2 px-2">ID</th><th class="py-2 px-2">OC</th><th class="py-2 px-2">Cliente</th><th class="py-2 px-2">SKU</th><th class="py-2 px-2">Pallets</th><th class="py-2 px-2">Estado</th>
+        </tr></thead><tbody>${pickingOrders.map(o=>`<tr class="border-b border-gray-100"><td class="py-1.5 px-2">${o.id}</td><td class="py-1.5 px-2">${o.numero_oc}</td><td class="py-1.5 px-2">${o.nombre_cliente}</td><td class="py-1.5 px-2">${o.sku}</td><td class="py-1.5 px-2">${o.cantidad}</td><td class="py-1.5 px-2"><span class="px-2 py-0.5 rounded-full text-xs ${o.estado==='Completada'?'bg-green-100 text-green-700':'bg-yellow-100 text-yellow-700'}">${o.estado}</span></td></tr>`).join('')||'<tr><td colspan="6" class="py-3 text-center text-gray-400">Sin órdenes</td></tr>'}</tbody></table></div>
+      </div>`);
+  }
+  if(currentSub===2){
+    return card(`<h3 class="font-semibold mb-4">Realizar Picking</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        ${inputField('ID de Ubicación','pick-ubi-id','text','UB-001')}
+        ${inputField('ID de Pallet','pick-pallet-id','text','PAL-0001')}
+      </div>
+      ${btn('Realizado','realizarPicking()','ocean')}
+      <div id="pick-realizado-result" class="mt-4"></div>`);
+  }
+  return '';
+}
+
+async function realizarPicking(){
+  const uid=document.getElementById('pick-ubi-id').value.trim();
+  const pid=document.getElementById('pick-pallet-id').value.trim();
+  const result=document.getElementById('pick-realizado-result');
+  if(!uid||!pid){showToast('Complete ubicación y pallet','error');result.innerHTML='';return;}
+  const ub=ubicaciones.find(u=>u.id_ubicacion===uid);
+  const pal=pallets.find(p=>p.id_pallet===pid);
+  if(!ub){showToast('Ubicación no encontrada','error');result.innerHTML='';return;}
+  if(!pal){showToast('Pallet no encontrado','error');result.innerHTML='';return;}
+  if(ub.estado_fisico==='Ocupado' && ub.id_pallet_ingresado!==pid){showToast('Ubicación ocupada con otro pallet','error');result.innerHTML='';return;}
+  
+  const payload = { id_ubicacion: uid, id_pallet: pid };
+  const apiResult = await callN8NApi('/Picking', 'POST', payload);
+  
+  if(apiResult.success){
+    ub.estado_fisico='Ocupado';
+    ub.estado_operativo='en picking';
+    ub.sku_almacenado=pal.sku;
+    ub.id_pallet_ingresado=pid;
+    ub.valor_pallet_ingresado=ub.valor_pallet_ingresado||preparaciones.find(p=>p.sku===pal.sku)?.costo||ub.valor_pallet_ingresado||'0';
+    ub.lote=pal.lote;
+    const now=new Date();
+    ub.fecha_ingreso=now.toISOString().split('T')[0];
+    ub.hora_ingreso=now.toLocaleTimeString();
+    pal.status='en picking';
+    pal.orden_picking=pal.orden_picking||'';
+    addMovimiento(pid,ub.fecha_ingreso,uid,'Picking','Realizar Picking');
+    result.innerHTML=`<div class="p-4 bg-brand-50 border border-brand-200 rounded-lg text-sm text-brand-700">Picking realizado para pallet <strong>${pid}</strong> en ubicación <strong>${uid}</strong>.</div>`;
+    saveData();
+  } else {
+    result.innerHTML=`<div class="p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">Error: ${apiResult.error}</div>`;
+  }
+}
+
+async function generarPicking(){
+  const fields=['pick-oc','pick-fact','pick-rut','pick-nombre','pick-dir','pick-comuna','pick-sku','pick-cant','pick-fecha'];
+  const vals=fields.map(f=>document.getElementById(f).value.trim());
+  if(vals.some(v=>!v)){showToast('Complete todos los campos','error');return;}
+  
+  const payload = {
+    numero_oc: vals[0],
+    numero_factura: vals[1],
+    rut_cliente: vals[2],
+    nombre_cliente: vals[3],
+    direccion_entrega: vals[4],
+    comuna_entrega: vals[5],
+    sku: vals[6],
+    cantidad_pallets: vals[7],
+    fecha_entrega_solicitada: vals[8]
+  };
+  
+  const result = await callN8NApi('/Picking', 'POST', payload);
+  
+  if(result.success){
+    const id='PICK-'+String(pickingCounter++).padStart(3,'0');
+    pickingOrders.push({id,numero_oc:vals[0],numero_factura:vals[1],rut_cliente:vals[2],nombre_cliente:vals[3],direccion:vals[4],comuna:vals[5],sku:vals[6],cantidad:vals[7],fecha_entrega:vals[8],estado:'En Proceso'});
+    addMovimiento(id,vals[8],'Almacén','Picking','Picking');
+    showToast(`Orden ${id} generada`);
+    saveData();
+    renderContent();
+  } else {
+    showToast('Error al generar orden de picking: ' + result.error, 'error');
+  }
+}
+
+async function buscarPicking(){
+  const id=document.getElementById('pick-mod-id').value.trim();
+  const order=pickingOrders.find(o=>o.id===id);
+  const el=document.getElementById('pick-mod-result');
+  if(!order){el.innerHTML='<p class="text-red-500 text-sm">Orden no encontrada</p>';return;}
+  el.innerHTML=`<div class="p-4 bg-gray-50 rounded-lg flex gap-4 items-end">
+    <p class="text-sm"><strong>${order.id}</strong> - ${order.nombre_cliente} | Estado: ${order.estado}</p>
+    ${selectField('Nuevo Estado','pick-new-est',['En Proceso','Completada'])}
+    ${btn('Aplicar','aplicarEstadoPicking("'+id+'")','ocean')}
+  </div>`;
+}
+
+async function aplicarEstadoPicking(id){
+  const ne=document.getElementById('pick-new-est').value;
+  if(!ne) return;
+  
+  const result = await callN8NApi('/Picking', 'POST', { id, nuevo_estado: ne });
+  
+  if(result.success){
+    const o=pickingOrders.find(x=>x.id===id);
+    if(o){
+      o.estado=ne;
+      showToast('Estado actualizado');
+      saveData();
+      renderContent();
+    }
+  } else {
+    showToast('Error al actualizar estado: ' + result.error, 'error');
+  }
+}
+
+function renderTrazabilidad(){
+  if(currentSub===0){
+    let rows=pallets.map(p=>`<tr class="border-b border-gray-100">
+      <td class="py-1.5 px-2">${p.id_pallet}</td><td class="py-1.5 px-2">${p.sku}</td>
+      <td class="py-1.5 px-2"><span class="px-2 py-0.5 rounded text-xs bg-sky-100 text-sky-700">${p.status}</span></td>
+      <td class="py-1.5 px-2">${p.orden_picking||'-'}</td><td class="py-1.5 px-2">${p.lote}</td>
+      <td class="py-1.5 px-2">${p.fecha_venc}</td><td class="py-1.5 px-2">${p.fecha_mod}</td><td class="py-1.5 px-2">${p.hora_mod}</td>
+    </tr>`).join('');
+    return card(`<h3 class="font-semibold mb-3">Pallets</h3>
+      <button onclick="cargarTrazabilidadDelBackend()" class="mb-3 px-3 py-1.5 text-xs bg-sky-500 hover:bg-sky-600 text-white rounded-lg">🔄 Cargar del Servidor</button>
+      <div class="overflow-x-auto"><table class="w-full text-left text-xs"><thead class="bg-gray-50"><tr>
+        <th class="py-2 px-2">ID Pallet</th><th class="py-2 px-2">SKU</th><th class="py-2 px-2">Status</th><th class="py-2 px-2">Orden Picking</th><th class="py-2 px-2">Lote</th><th class="py-2 px-2">F. Venc.</th><th class="py-2 px-2">F. Mod.</th><th class="py-2 px-2">Hora Mod.</th>
+      </tr></thead><tbody>${rows||'<tr><td colspan="8" class="py-4 text-center text-gray-400">Sin pallets</td></tr>'}</tbody></table></div>`);
+  }
+  if(currentSub===1){
+    return card(`<h3 class="font-semibold mb-4">Modificación de Status</h3>
+      <div class="flex gap-3 items-end mb-4">
+        ${inputField('Buscar por ID Pallet','traz-id','text','PAL-0001')}
+        ${btn('Buscar','buscarPalletTraz()','sky')}
+      </div>
+      <div id="traz-result"></div>`);
+  }
+  return '';
+}
+
+async function cargarTrazabilidadDelBackend(){
+  showToast('Cargando trazabilidad...', 'info');
+  const result = await callN8NApi('/Trazabilidad', 'GET');
+  if(result.success){
+    pallets = Array.isArray(result.data) ? result.data : (result.data.pallets || []);
+    saveData();
+    renderContent();
+    showToast('Trazabilidad cargada correctamente');
+  } else {
+    showToast('Error al cargar trazabilidad: ' + result.error, 'error');
+  }
+}
+
+function buscarPalletTraz(){
+  const id=document.getElementById('traz-id').value.trim();
+  const pal=pallets.find(p=>p.id_pallet===id);
+  const el=document.getElementById('traz-result');
+  if(!pal){el.innerHTML='<p class="text-red-500 text-sm">Pallet no encontrado</p>';return;}
+  el.innerHTML=`<div class="p-4 bg-gray-50 rounded-lg space-y-3">
+    <p class="text-sm"><strong>${pal.id_pallet}</strong> | SKU: ${pal.sku} | Status: ${pal.status}</p>
+    <div class="flex gap-3 items-end">
+      ${selectField('Nuevo Status','traz-status',['Transito previo a almacenamiento','almacenado','pendiente de picking','en picking','en consolidado','en despacho','bloqueado'])}
+      ${btn('Aplicar Cambios','aplicarStatusPallet("'+id+'")','ocean')}
+    </div>
+  </div>`;
+}
+
+async function aplicarStatusPallet(id){
+  const ns=document.getElementById('traz-status').value;
+  if(!ns)return;
+  const pal=pallets.find(p=>p.id_pallet===id);
+  if(!pal) return;
+  
+  const result = await callN8NApi('/Trazabilidad', 'POST', { id_pallet: id, nuevo_status: ns });
+  
+  if(result.success){
+    const old=pal.status;
+    pal.status=ns;
+    const now=new Date();
+    pal.fecha_mod=now.toISOString().split('T')[0];
+    pal.hora_mod=now.toLocaleTimeString();
+    addMovimiento(id,pal.fecha_mod,old,ns,'Cambio de status');
+    showToast('Status actualizado');
+    saveData();
+    renderContent();
+  } else {
+    showToast('Error al actualizar status: ' + result.error, 'error');
+  }
+}
+
+// ===== INVENTARIO =====
+async function renderInventario(){
+  showToast('Cargando inventario...', 'info');
+  const result = await callN8NApi('/inventario', 'GET');
+  
+  if(result.success){
+    const inventarioData = Array.isArray(result.data) ? result.data : (result.data.inventario || []);
+    let rows=inventarioData.map(item=>{
+      return `<tr class="border-b border-gray-100">
+        <td class="py-1.5 px-2">${item.sku||'-'}</td>
+        <td class="py-1.5 px-2">${item.formato||'-'}</td>
+        <td class="py-1.5 px-2">${item.pallets_almacen||0}</td>
+        <td class="py-1.5 px-2">$${((item.pallets_almacen||0)*(item.costo||0)).toLocaleString()}</td>
+        <td class="py-1.5 px-2">${item.en_recepcion||0}</td>
+        <td class="py-1.5 px-2">$${((item.en_recepcion||0)*(item.costo||0)).toLocaleString()}</td>
+        <td class="py-1.5 px-2">${item.almacenados||0}</td>
+        <td class="py-1.5 px-2">$${((item.almacenados||0)*(item.costo||0)).toLocaleString()}</td>
+        <td class="py-1.5 px-2">${item.pend_picking||0}</td>
+        <td class="py-1.5 px-2">$${((item.pend_picking||0)*(item.costo||0)).toLocaleString()}</td>
+        <td class="py-1.5 px-2">${item.en_picking||0}</td>
+        <td class="py-1.5 px-2">$${((item.en_picking||0)*(item.costo||0)).toLocaleString()}</td>
+        <td class="py-1.5 px-2">${item.consolidado||0}</td>
+        <td class="py-1.5 px-2">$${((item.consolidado||0)*(item.costo||0)).toLocaleString()}</td>
+        <td class="py-1.5 px-2">${item.en_despacho||0}</td>
+      </tr>`;
+    }).join('');
+    
+    return card(`<h3 class="font-semibold mb-3">Inventario General</h3>
+      <div class="overflow-x-auto"><table class="w-full text-left text-xs"><thead class="bg-gray-50"><tr>
+        <th class="py-2 px-2">SKU</th><th class="py-2 px-2">Formato</th>
+        <th class="py-2 px-2">Pallets Almacén</th><th class="py-2 px-2">Valor</th>
+        <th class="py-2 px-2">En Recepción</th><th class="py-2 px-2">Valor</th>
+        <th class="py-2 px-2">Almacenados</th><th class="py-2 px-2">Valor</th>
+        <th class="py-2 px-2">Pend. Picking</th><th class="py-2 px-2">Valor</th>
+        <th class="py-2 px-2">En Picking</th><th class="py-2 px-2">Valor</th>
+        <th class="py-2 px-2">Consolidado</th><th class="py-2 px-2">Valor</th>
+        <th class="py-2 px-2">En Despacho</th>
+      </tr></thead><tbody>${rows||'<tr><td colspan="15" class="py-4 text-center text-gray-400">Sin datos de inventario</td></tr>'}</tbody></table></div>`);
+  } else {
+    return card(`<h3 class="font-semibold mb-3">Inventario General</h3>
+      <div class="p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">Error al cargar inventario: ${result.error}</div>`);
+  }
+}
+
+// ===== HISTORIAL =====
+async function renderHistorial(){
+  showToast('Cargando historial...', 'info');
+  const result = await callN8NApi('/historial-movimientos', 'GET');
+  
+  if(result.success){
+    const historialData = Array.isArray(result.data) ? result.data : (result.data.movimientos || movimientos);
+    let rows=historialData.map(m=>`<tr class="border-b border-gray-100">
+      <td class="py-1.5 px-2">${m.id_pallet||m.id||'-'}</td><td class="py-1.5 px-2">${m.fecha||'-'}</td><td class="py-1.5 px-2">${m.hora||'-'}</td>
+      <td class="py-1.5 px-2">${m.origen||'-'}</td><td class="py-1.5 px-2">${m.destino||'-'}</td><td class="py-1.5 px-2">${m.tipo||'-'}</td>
+    </tr>`).join('');
+    return card(`<h3 class="font-semibold mb-3">Historial de Movimientos</h3>
+      <div class="overflow-x-auto"><table class="w-full text-left text-xs"><thead class="bg-gray-50"><tr>
+        <th class="py-2 px-2">ID Pallet</th><th class="py-2 px-2">Fecha</th><th class="py-2 px-2">Hora</th><th class="py-2 px-2">Origen</th><th class="py-2 px-2">Destino</th><th class="py-2 px-2">Tipo</th>
+      </tr></thead><tbody>${rows||'<tr><td colspan="6" class="py-4 text-center text-gray-400">Sin movimientos registrados</td></tr>'}</tbody></table></div>`);
+  } else {
+    return card(`<h3 class="font-semibold mb-3">Historial de Movimientos</h3>
+      <div class="p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">Error al cargar historial: ${result.error}</div>`);
+  }
+}
+
+// ===== ALERTAS =====
+async function renderAlertas(){
+  showToast('Cargando alertas...', 'info');
+  const result = await callN8NApi('/alertas', 'GET');
+  
+  if(result.success){
+    const alertasData = result.data.alertas || {};
+    const caducidad = alertasData.caducidad || [];
+    const vencidos = alertasData.vencidos || [];
+    
+    return `<div class="space-y-4">
+      ${card(`<div class="flex items-center gap-2 mb-3"><span class="text-yellow-500 text-xl">⚠️</span><h3 class="font-semibold">Alertas de Caducidad (próximos 30 días)</h3></div>
+        ${caducidad.length?`<div class="space-y-2">${caducidad.map(p=>`<div class="p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm flex justify-between"><span>${p.id_pallet||p} - ${p.sku||''}</span><span class="text-yellow-700">Vence: ${p.fecha_venc||p}</span></div>`).join('')}</div>`:'<p class="text-gray-400 text-sm">Sin alertas de caducidad próxima</p>'}`)}
+      ${card(`<div class="flex items-center gap-2 mb-3"><span class="text-red-500 text-xl">❌</span><h3 class="font-semibold">Productos Vencidos</h3></div>
+        ${vencidos.length?`<div class="space-y-2">${vencidos.map(p=>`<div class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm flex justify-between"><span>${p.id_pallet||p} - ${p.sku||''}</span><span class="text-red-700">Venció: ${p.fecha_venc||p}</span></div>`).join('')}</div>`:'<p class="text-gray-400 text-sm">Sin productos vencidos</p>'}`)}
+      ${card(`<div class="flex items-center gap-2 mb-3"><span class="text-orange-500 text-xl">📦</span><h3 class="font-semibold">Stock de Seguridad</h3></div>
+        <p class="text-gray-400 text-sm">Configure niveles de stock de seguridad por SKU para activar alertas</p>`)}
+    </div>`;
+  } else {
+    return card(`<h3 class="font-semibold mb-3">Alertas</h3>
+      <div class="p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">Error al cargar alertas: ${result.error}</div>`);
+  }
+}
+
+function addMovimiento(id_pallet,fecha,origen,destino,tipo){
+  movimientos.push({id_pallet,fecha,hora:new Date().toLocaleTimeString(),origen,destino,tipo});
+}
+
+// ===== PROVEEDORES =====
+function renderProveedores(){
+  return card(`<h3 class="font-semibold mb-4">Evaluación de Proveedores</h3>
+    <div class="space-y-4">
+      ${inputField('Nombre del Proveedor','eval-prov','text','Proveedor XYZ')}
+      <div class="border-t pt-4">
+        <p class="text-sm font-medium mb-3 text-gray-600">Ponderación de Criterios (suma debe ser 100%)</p>
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+          ${inputField('Precio (%)','w-precio','number','20')}
+          ${inputField('Confianza (%)','w-confianza','number','20')}
+          ${inputField('Calidad (%)','w-calidad','number','20')}
+          ${inputField('Plazo Pago (%)','w-pago','number','20')}
+          ${inputField('Plazo Entrega (%)','w-entrega','number','20')}
+        </div>
+        <p id="peso-total" class="text-xs text-gray-500 mt-1">Total: 100%</p>
+      </div>
+      <div class="border-t pt-4">
+        <p class="text-sm font-medium mb-3 text-gray-600">Calificación (1-10)</p>
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+          ${inputField('Precio','c-precio','number','5')}
+          ${inputField('Confianza','c-confianza','number','5')}
+          ${inputField('Calidad','c-calidad','number','5')}
+          ${inputField('Plazo Pago','c-pago','number','5')}
+          ${inputField('Plazo Entrega','c-entrega','number','5')}
+        </div>
+      </div>
+      ${btn('Calificar Proveedor','calificarProveedor()')}
+      <div id="eval-result"></div>
+      <div class="border-t pt-4">
+        <h4 class="font-medium text-sm mb-2">Evaluaciones Guardadas</h4>
+        <div class="space-y-2" id="eval-list">${evaluaciones.map(e=>`<div class="p-3 bg-gray-50 rounded-lg flex justify-between"><span class="font-medium text-sm">${e.proveedor}</span><span class="text-sm text-brand-600 font-bold">${e.nota.toFixed(2)}/10</span></div>`).join('')||'<p class="text-gray-400 text-sm">Sin evaluaciones</p>'}</div>
+      </div>
+    </div>`);
+}
+
+function calificarProveedor(){
+  const prov=document.getElementById('eval-prov').value.trim();
+  if(!prov){showToast('Ingrese proveedor','error');return;}
+  const weights=[parseFloat(document.getElementById('w-precio').value)||0,parseFloat(document.getElementById('w-confianza').value)||0,parseFloat(document.getElementById('w-calidad').value)||0,parseFloat(document.getElementById('w-pago').value)||0,parseFloat(document.getElementById('w-entrega').value)||0];
+  const total=weights.reduce((a,b)=>a+b,0);
+  if(total>100){showToast('La suma de ponderaciones no debe superar 100%','error');return;}
+  const scores=[parseFloat(document.getElementById('c-precio').value)||0,parseFloat(document.getElementById('c-confianza').value)||0,parseFloat(document.getElementById('c-calidad').value)||0,parseFloat(document.getElementById('c-pago').value)||0,parseFloat(document.getElementById('c-entrega').value)||0];
+  if(scores.some(s=>s<1||s>10)){showToast('Calificaciones deben ser entre 1 y 10','error');return;}
+  const nota=scores.reduce((acc,s,i)=>acc+(s*weights[i]/100),0);
+  evaluaciones.push({proveedor:prov,nota,weights,scores});
+  document.getElementById('eval-result').innerHTML=`<div class="p-4 bg-brand-50 rounded-lg border border-brand-200 text-center">
+    <p class="text-lg font-bold text-brand-700">${prov}: ${nota.toFixed(2)}/10</p>
+  </div>`;
+  saveData(); renderContent();
+}
+
+// ===== TOAST =====
+function showToast(msg,type='success'){
+  const toast=document.createElement('div');
+  toast.className=`fixed bottom-4 right-4 px-4 py-3 rounded-lg shadow-lg text-sm text-white z-50 ${type==='error'?'bg-red-500':'bg-brand-500'}`;
+  toast.textContent=msg;
+  document.body.appendChild(toast);
+  setTimeout(()=>toast.remove(),3000);
+}
+
+// Estado change listener for prep-recepcion and almacenamiento
+document.addEventListener('change',e=>{
+  if(e.target.id==='prep-estado'){
+    const fields=document.getElementById('rechazo-fields');
+    if(fields) fields.classList.toggle('hidden',e.target.value!=='Rechazado');
+  }
+  if(e.target.id==='ubic-efis'){
+    const fields=document.getElementById('ubic-ocupado-fields');
+    if(fields) fields.classList.toggle('hidden',e.target.value==='Disponible');
+  }
+});
+
+document.addEventListener('input',e=>{
+  if(['w-precio','w-confianza','w-calidad','w-pago','w-entrega'].includes(e.target.id)){
+    const total=['w-precio','w-confianza','w-calidad','w-pago','w-entrega'].reduce((acc,id)=>acc+(parseFloat(document.getElementById(id).value)||0),0);
+    const el=document.getElementById('peso-total');
+    if(el) el.textContent=`Total: ${total}%`;
+  }
+});
+
+function saveData(){
+  const record={productos,preparaciones,ubicaciones,pallets,pickingOrders,movimientos,evaluaciones,entryCounter,pickingCounter};
+  localStorage.setItem('warehouse_data',JSON.stringify(record));
+}
+
+function loadData(){
+  try{
+    const stored=localStorage.getItem('warehouse_data');
+    if(!stored) return;
+    const parsed=JSON.parse(stored);
+    productos=parsed.productos||[];
+    preparaciones=parsed.preparaciones||[];
+    ubicaciones=parsed.ubicaciones||ubicaciones;
+    pallets=parsed.pallets||[];
+    pickingOrders=parsed.pickingOrders||[];
+    movimientos=parsed.movimientos||[];
+    evaluaciones=parsed.evaluaciones||[];
+    entryCounter=parsed.entryCounter||entryCounter;
+    pickingCounter=parsed.pickingCounter||pickingCounter;
+  }catch(e){console.warn('No se pudo cargar el almacenamiento local',e);}
+}
+
+loadData();
+buildNav();
+renderContent();
+</script>
+</body>
+</html>
